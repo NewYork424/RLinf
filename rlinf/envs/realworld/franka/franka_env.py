@@ -51,6 +51,8 @@ class FrankaRobotConfig:
     gripper_type: Optional[str] = None
     gripper_connection: Optional[str] = None
     enable_camera_player: bool = True
+    enable_camera_depth: bool = False
+    camera_observation_size: int = 128
     # Per-camera crop regions keyed by serial number.
     # Each value is [top%, left%, bottom%, right%] in 0..1 range.
     # Example: {"230322271990": [0.0, 0.15, 1.0, 0.85]}
@@ -583,31 +585,46 @@ class FrankaEnv(gym.Env):
             ee_state_dim = 1
             ee_low, ee_high = -1.0, 1.0
 
-        self.observation_space = gym.spaces.Dict(
-            {
-                "state": gym.spaces.Dict(
-                    {
-                        "tcp_pose": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(obs_tcp_pose_dim,)
-                        ),
-                        "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
-                        ee_state_key: gym.spaces.Box(
-                            ee_low, ee_high, shape=(ee_state_dim,)
-                        ),
-                        "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
-                        "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
-                    }
-                ),
-                "frames": gym.spaces.Dict(
-                    {
-                        camera_info.name: gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
-                        )
-                        for camera_info in self._camera_infos
-                    }
-                ),
-            }
-        )
+        camera_size = int(self.config.camera_observation_size)
+        if camera_size <= 0:
+            raise ValueError(
+                "camera_observation_size must be positive; "
+                f"got {self.config.camera_observation_size!r}"
+            )
+
+        observation_spaces = {
+            "state": gym.spaces.Dict(
+                {
+                    "tcp_pose": gym.spaces.Box(
+                        -np.inf, np.inf, shape=(obs_tcp_pose_dim,)
+                    ),
+                    "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
+                    ee_state_key: gym.spaces.Box(
+                        ee_low, ee_high, shape=(ee_state_dim,)
+                    ),
+                    "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                    "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                }
+            ),
+            "frames": gym.spaces.Dict(
+                {
+                    camera_info.name: gym.spaces.Box(
+                        0, 255, shape=(camera_size, camera_size, 3), dtype=np.uint8
+                    )
+                    for camera_info in self._camera_infos
+                }
+            ),
+        }
+        if self.config.enable_camera_depth:
+            observation_spaces["depths"] = gym.spaces.Dict(
+                {
+                    camera_info.name: gym.spaces.Box(
+                        0.0, np.inf, shape=(camera_size, camera_size), dtype=np.float32
+                    )
+                    for camera_info in self._camera_infos
+                }
+            )
+        self.observation_space = gym.spaces.Dict(observation_spaces)
         self._base_observation_space = copy.deepcopy(self.observation_space)
 
     @staticmethod
@@ -680,6 +697,7 @@ class FrankaEnv(gym.Env):
                     name=name,
                     serial_number=serial,
                     camera_type=default_camera_type,
+                    enable_depth=self.config.enable_camera_depth,
                     crop_region=crop_region,
                 )
             )
@@ -747,7 +765,15 @@ class FrankaEnv(gym.Env):
 
     def _get_camera_frames(self) -> dict[str, np.ndarray]:
         """Get frames from all cameras."""
+        frames, _depths = self._get_camera_observation()
+        return frames
+
+    def _get_camera_observation(
+        self,
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """Get RGB frames and optional aligned depth from all cameras."""
         frames = {}
+        depths = {}
         display_frames = {}
         for camera in self._cameras:
             try:
@@ -755,8 +781,9 @@ class FrankaEnv(gym.Env):
                 reshape_size = self.observation_space["frames"][
                     camera._camera_info.name
                 ].shape[:2][::-1]
+                color_frame = frame[..., :3].astype(np.uint8, copy=False)
                 cropped_frame, resized_frame = self._crop_frame(
-                    frame,
+                    color_frame,
                     reshape_size,
                     crop_region=camera._camera_info.crop_region,
                 )
@@ -769,6 +796,25 @@ class FrankaEnv(gym.Env):
                 display_frames[f"{camera._camera_info.name}_full"] = (
                     cropped_frame  # Non-resized version
                 )
+                if self.config.enable_camera_depth and frame.shape[-1] > 3:
+                    cropped_depth = self._crop_depth_frame(
+                        frame[..., 3],
+                        crop_region=camera._camera_info.crop_region,
+                    )
+                    resized_depth = cv2.resize(
+                        cropped_depth,
+                        reshape_size,
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    depth_scale = float(getattr(camera, "depth_scale", 1.0))
+                    depths[camera._camera_info.name] = (
+                        resized_depth.astype(np.float32) * depth_scale
+                    )
+                elif self.config.enable_camera_depth:
+                    raise RuntimeError(
+                        "enable_camera_depth=True, but camera "
+                        f"{camera._camera_info.name!r} did not return a depth channel."
+                    )
             except queue.Empty:
                 self._logger.warning(
                     f"Camera {camera._camera_info.name} is not producing frames. Wait 5 seconds and try again."
@@ -776,10 +822,142 @@ class FrankaEnv(gym.Env):
                 time.sleep(5)
                 camera.close()
                 self._open_cameras()
-                return self._get_camera_frames()
+                return self._get_camera_observation()
 
         self.camera_player.put_frame(display_frames)
-        return frames
+        return frames, depths
+
+    def get_camera_metadata(self) -> dict[str, Any]:
+        """Return camera projection metadata for saved RGBD observations.
+
+        The returned ``intrinsic_K`` is adjusted for the same crop and resize
+        used by ``_get_camera_observation()``, so its pixel coordinates match
+        the RGB/depth tensors returned in observations.
+        """
+        output_shape = next(iter(self.observation_space["frames"].spaces.values())).shape
+        output_h, output_w = int(output_shape[0]), int(output_shape[1])
+        cameras: dict[str, Any] = {}
+        for camera in getattr(self, "_cameras", []):
+            info = camera._camera_info
+            raw_intrinsics = None
+            if hasattr(camera, "get_color_intrinsics"):
+                raw_intrinsics = camera.get_color_intrinsics()
+            cameras[info.name] = self._camera_projection_metadata(
+                camera_info=info,
+                raw_intrinsics=raw_intrinsics,
+                output_size=(output_w, output_h),
+                depth_scale=float(getattr(camera, "depth_scale", 1.0)),
+            )
+        return {
+            "source": "rlinf_franka_env",
+            "image_coordinate_convention": "pixel [u, v] maps to array [v, u]",
+            "depth_unit": "m",
+            "depth_aligned_to_color": bool(self.config.enable_camera_depth),
+            "cameras": cameras,
+            "extrinsics_note": (
+                "camera-to-base and camera-to-ee extrinsics are not provided by "
+                "RLinf. Fill them from hand-eye or fixed-camera calibration before "
+                "requesting base-frame back-projection."
+            ),
+        }
+
+    def _camera_projection_metadata(
+        self,
+        *,
+        camera_info: CameraInfo,
+        raw_intrinsics: dict[str, Any] | None,
+        output_size: tuple[int, int],
+        depth_scale: float,
+    ) -> dict[str, Any]:
+        raw_w, raw_h = camera_info.resolution
+        if raw_intrinsics is not None:
+            raw_w = int(raw_intrinsics["width"])
+            raw_h = int(raw_intrinsics["height"])
+        x1, y1, x2, y2 = self._crop_bounds(
+            width=raw_w,
+            height=raw_h,
+            crop_region=camera_info.crop_region,
+        )
+        out_w, out_h = output_size
+        metadata: dict[str, Any] = {
+            "name": camera_info.name,
+            "serial_number": camera_info.serial_number,
+            "camera_type": camera_info.camera_type,
+            "raw_resolution": [raw_w, raw_h],
+            "output_resolution": [out_w, out_h],
+            "crop_bounds_xyxy": [x1, y1, x2, y2],
+            "crop_region": list(camera_info.crop_region)
+            if camera_info.crop_region is not None
+            else None,
+            "depth_scale": depth_scale,
+            "depth_aligned_to_color": bool(self.config.enable_camera_depth),
+            "extrinsic_cam2base": None,
+            "extrinsic_cam2ee": None,
+        }
+        if raw_intrinsics is None:
+            metadata["raw_color_intrinsics"] = None
+            metadata["intrinsic_K"] = None
+            metadata["projection_note"] = (
+                "Raw camera intrinsics are unavailable for this camera backend."
+            )
+            return metadata
+
+        scale_x = out_w / float(x2 - x1)
+        scale_y = out_h / float(y2 - y1)
+        fx = float(raw_intrinsics["fx"]) * scale_x
+        fy = float(raw_intrinsics["fy"]) * scale_y
+        cx = (float(raw_intrinsics["ppx"]) - x1) * scale_x
+        cy = (float(raw_intrinsics["ppy"]) - y1) * scale_y
+        metadata["raw_color_intrinsics"] = raw_intrinsics
+        metadata["intrinsic_K"] = [
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ]
+        metadata["projection_note"] = (
+            f"For saved {out_w}x{out_h} RGB/depth: z=depth[v,u], "
+            "x=(u-cx)*z/fx, y=(v-cy)*z/fy."
+        )
+        return metadata
+
+    @staticmethod
+    def _crop_bounds(
+        *,
+        width: int,
+        height: int,
+        crop_region: tuple[float, float, float, float] | None = None,
+    ) -> tuple[int, int, int, int]:
+        if crop_region is not None:
+            top_pct, left_pct, bottom_pct, right_pct = crop_region
+            x1 = int(width * left_pct)
+            y1 = int(height * top_pct)
+            x2 = int(width * right_pct)
+            y2 = int(height * bottom_pct)
+            return x1, y1, x2, y2
+
+        crop_size = min(height, width)
+        x1 = (width - crop_size) // 2
+        y1 = (height - crop_size) // 2
+        return x1, y1, x1 + crop_size, y1 + crop_size
+
+    @staticmethod
+    def _crop_depth_frame(
+        depth: np.ndarray,
+        crop_region: tuple[float, float, float, float] | None = None,
+    ) -> np.ndarray:
+        h, w = depth.shape[:2]
+        if crop_region is not None:
+            top_pct, left_pct, bottom_pct, right_pct = crop_region
+            y1 = int(h * top_pct)
+            x1 = int(w * left_pct)
+            y2 = int(h * bottom_pct)
+            x2 = int(w * right_pct)
+            return depth[y1:y2, x1:x2]
+
+        crop_size = min(h, w)
+        start_x = (w - crop_size) // 2
+        start_y = (h - crop_size) // 2
+        return depth[start_y : start_y + crop_size, start_x : start_x + crop_size]
 
     # Robot actions
 
@@ -875,7 +1053,7 @@ class FrankaEnv(gym.Env):
 
     def _get_observation(self) -> dict:
         if not self.config.is_dummy:
-            frames = self._get_camera_frames()
+            frames, depths = self._get_camera_observation()
             state: dict = {
                 "tcp_pose": self._franka_state.tcp_pose,
                 "tcp_vel": self._franka_state.tcp_vel,
@@ -896,6 +1074,8 @@ class FrankaEnv(gym.Env):
                 "state": state,
                 "frames": frames,
             }
+            if self.config.enable_camera_depth:
+                observation["depths"] = depths
             return copy.deepcopy(observation)
         else:
             obs = self._base_observation_space.sample()
