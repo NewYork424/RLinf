@@ -1,0 +1,101 @@
+env_type: realworld
+
+total_num_envs: 1
+
+auto_reset: False
+ignore_terminations: False
+reward_mode: raw
+wrap_obs_mode: simple
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 200000000
+max_episode_steps: 200000000
+use_spacemouse: False
+no_gripper: False
+main_image_key: wrist_1
+keyboard_reward_wrapper: null
+use_relative_frame: True
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "PhysicalAgentFrankaEnv-v1"
+  num_envs: null
+
+# vla调用直接在当前状态进行推理
+override_cfg:
+  is_dummy: false
+  task_description: "grasp the target object"
+
+  camera_serials: ["141722075170", "233622072915"]
+  camera_names:
+    "141722075170": wrist_1
+    "233622072915": third_person
+  enable_camera_player: False
+  enable_camera_depth: True
+  camera_resize: False
+  camera_observation_size: 512
+
+  target_ee_pose: [ 0.58568951 , 0.0377056 , -0.00938398 , 3.00238222, -0.00808239 ,-0.09303466]
+  # target_ee_pose: [0.65875577, 0.04438992, 0.07458871, 2.94857731, -0.0676843, -0.18130717]
+  # reset_ee_pose: [0.65875577, 0.04438992, 0.07458871, 2.94857731, -0.0676843, -0.18130717]
+  # default reset_ee_pose is target_ee_pose + [0.0, 0.0, clip_z_range_high, 0.0, 0.0, 0.0]
+
+  action_scale: [0.02, 0.1, 1]
+
+  random_xy_range: 0.0
+  random_rz_range: 0.0
+  clip_x_range: 0.5
+  clip_y_range: 0.5
+  clip_z_range_low: 0.04
+  clip_z_range_high: 0.2
+  clip_roll_pitch_range: 0.01
+  clip_rz_range: 1.58
+  max_num_steps: 200000000
+  success_hold_steps: 1
+  reward_threshold: [0.01, 0.01, 0.01, 0.2, 0.2, 0.2]
+  enable_gripper_penalty: false
+
+  compliance_param:
+    translational_stiffness: 2000
+    translational_damping: 89
+    rotational_stiffness: 150
+    rotational_damping: 7
+    translational_Ki: 0
+    translational_clip_x: 0.01
+    translational_clip_y: 0.01
+    translational_clip_z: 0.01
+    translational_clip_neg_x: 0.01
+    translational_clip_neg_y: 0.01
+    translational_clip_neg_z: 0.01
+    rotational_clip_x: 0.02
+    rotational_clip_y: 0.02
+    rotational_clip_z: 0.02
+    rotational_clip_neg_x: 0.02
+    rotational_clip_neg_y: 0.02
+    rotational_clip_neg_z: 0.02
+    rotational_Ki: 0
+
+  precision_param:
+    translational_stiffness: 3000
+    translational_damping: 89
+    rotational_stiffness: 300
+    rotational_damping: 9
+    translational_Ki: 0.1
+    translational_clip_x: 0.01
+    translational_clip_y: 0.01
+    translational_clip_z: 0.01
+    translational_clip_neg_x: 0.01
+    translational_clip_neg_y: 0.01
+    translational_clip_neg_z: 0.01
+    rotational_clip_x: 0.05
+    rotational_clip_y: 0.05
+    rotational_clip_z: 0.05
+    rotational_clip_neg_x: 0.05
+    rotational_clip_neg_y: 0.05
+    rotational_clip_neg_z: 0.05
+    rotational_Ki: 0.1

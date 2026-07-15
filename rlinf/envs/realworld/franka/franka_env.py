@@ -53,6 +53,10 @@ class FrankaRobotConfig:
     enable_camera_player: bool = True
     enable_camera_depth: bool = False
     camera_observation_size: int = 128
+    # If False, observations keep the camera's raw resolution and are not
+    # centre-cropped or resized. If crop_region is provided, only that crop is
+    # applied and the cropped resolution is preserved.
+    camera_resize: bool = True
     # Per-camera crop regions keyed by serial number.
     # Each value is [top%, left%, bottom%, right%] in 0..1 range.
     # Example: {"230322271990": [0.0, 0.15, 1.0, 0.85]}
@@ -585,12 +589,13 @@ class FrankaEnv(gym.Env):
             ee_state_dim = 1
             ee_low, ee_high = -1.0, 1.0
 
-        camera_size = int(self.config.camera_observation_size)
-        if camera_size <= 0:
-            raise ValueError(
-                "camera_observation_size must be positive; "
-                f"got {self.config.camera_observation_size!r}"
-            )
+        if self.config.camera_resize:
+            camera_size = int(self.config.camera_observation_size)
+            if camera_size <= 0:
+                raise ValueError(
+                    "camera_observation_size must be positive; "
+                    f"got {self.config.camera_observation_size!r}"
+                )
 
         observation_spaces = {
             "state": gym.spaces.Dict(
@@ -609,7 +614,10 @@ class FrankaEnv(gym.Env):
             "frames": gym.spaces.Dict(
                 {
                     camera_info.name: gym.spaces.Box(
-                        0, 255, shape=(camera_size, camera_size, 3), dtype=np.uint8
+                        0,
+                        255,
+                        shape=(*self._camera_observation_hw(camera_info), 3),
+                        dtype=np.uint8,
                     )
                     for camera_info in self._camera_infos
                 }
@@ -619,13 +627,27 @@ class FrankaEnv(gym.Env):
             observation_spaces["depths"] = gym.spaces.Dict(
                 {
                     camera_info.name: gym.spaces.Box(
-                        0.0, np.inf, shape=(camera_size, camera_size), dtype=np.float32
+                        0.0,
+                        np.inf,
+                        shape=self._camera_observation_hw(camera_info),
+                        dtype=np.float32,
                     )
                     for camera_info in self._camera_infos
                 }
             )
         self.observation_space = gym.spaces.Dict(observation_spaces)
         self._base_observation_space = copy.deepcopy(self.observation_space)
+
+    def _camera_observation_hw(self, camera_info: CameraInfo) -> tuple[int, int]:
+        if self.config.camera_resize:
+            camera_size = int(self.config.camera_observation_size)
+            return camera_size, camera_size
+        width, height = camera_info.resolution
+        if camera_info.crop_region is not None:
+            top_pct, left_pct, bottom_pct, right_pct = camera_info.crop_region
+            height = int(height * bottom_pct) - int(height * top_pct)
+            width = int(width * right_pct) - int(width * left_pct)
+        return int(height), int(width)
 
     @staticmethod
     def _normalize_crop_region(
@@ -740,7 +762,8 @@ class FrankaEnv(gym.Env):
             reshape_size: Target ``(width, height)`` after resize.
             crop_region: Optional relative crop ``(top, left, bottom, right)``
                 where each value is in ``[0, 1]``.  ``None`` falls back to the
-                default centre-square crop.
+                default centre-square crop only when ``camera_resize=True``;
+                otherwise it preserves the full raw frame.
 
         Returns:
             A tuple of ``(cropped_frame, resized_frame)``.
@@ -753,14 +776,19 @@ class FrankaEnv(gym.Env):
             y2 = int(h * bottom_pct)
             x2 = int(w * right_pct)
             cropped_frame = frame[y1:y2, x1:x2]
-        else:
+        elif self.config.camera_resize:
             crop_size = min(h, w)
             start_x = (w - crop_size) // 2
             start_y = (h - crop_size) // 2
             cropped_frame = frame[
                 start_y : start_y + crop_size, start_x : start_x + crop_size
             ]
-        resized_frame = cv2.resize(cropped_frame, reshape_size)
+        else:
+            cropped_frame = frame
+        if self.config.camera_resize:
+            resized_frame = cv2.resize(cropped_frame, reshape_size)
+        else:
+            resized_frame = cropped_frame
         return cropped_frame, resized_frame
 
     def _get_camera_frames(self) -> dict[str, np.ndarray]:
@@ -800,12 +828,16 @@ class FrankaEnv(gym.Env):
                     cropped_depth = self._crop_depth_frame(
                         frame[..., 3],
                         crop_region=camera._camera_info.crop_region,
+                        default_square_crop=bool(self.config.camera_resize),
                     )
-                    resized_depth = cv2.resize(
-                        cropped_depth,
-                        reshape_size,
-                        interpolation=cv2.INTER_NEAREST,
-                    )
+                    if self.config.camera_resize:
+                        resized_depth = cv2.resize(
+                            cropped_depth,
+                            reshape_size,
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    else:
+                        resized_depth = cropped_depth
                     depth_scale = float(getattr(camera, "depth_scale", 1.0))
                     depths[camera._camera_info.name] = (
                         resized_depth.astype(np.float32) * depth_scale
@@ -877,6 +909,7 @@ class FrankaEnv(gym.Env):
             width=raw_w,
             height=raw_h,
             crop_region=camera_info.crop_region,
+            default_square_crop=bool(self.config.camera_resize),
         )
         out_w, out_h = output_size
         metadata: dict[str, Any] = {
@@ -926,6 +959,7 @@ class FrankaEnv(gym.Env):
         width: int,
         height: int,
         crop_region: tuple[float, float, float, float] | None = None,
+        default_square_crop: bool = True,
     ) -> tuple[int, int, int, int]:
         if crop_region is not None:
             top_pct, left_pct, bottom_pct, right_pct = crop_region
@@ -934,6 +968,9 @@ class FrankaEnv(gym.Env):
             x2 = int(width * right_pct)
             y2 = int(height * bottom_pct)
             return x1, y1, x2, y2
+
+        if not default_square_crop:
+            return 0, 0, int(width), int(height)
 
         crop_size = min(height, width)
         x1 = (width - crop_size) // 2
@@ -944,6 +981,7 @@ class FrankaEnv(gym.Env):
     def _crop_depth_frame(
         depth: np.ndarray,
         crop_region: tuple[float, float, float, float] | None = None,
+        default_square_crop: bool = True,
     ) -> np.ndarray:
         h, w = depth.shape[:2]
         if crop_region is not None:
@@ -953,6 +991,9 @@ class FrankaEnv(gym.Env):
             y2 = int(h * bottom_pct)
             x2 = int(w * right_pct)
             return depth[y1:y2, x1:x2]
+
+        if not default_square_crop:
+            return depth
 
         crop_size = min(h, w)
         start_x = (w - crop_size) // 2

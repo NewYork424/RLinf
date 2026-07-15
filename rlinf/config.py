@@ -159,8 +159,14 @@ def torch_dtype_from_precision(
         )
 
 
-@torch.jit.script
-def gelu_impl(x):
+_DISABLE_TORCH_COMPILE = (
+    os.environ.get("RLINF_DISABLE_TORCH_COMPILE")
+    or os.environ.get("TORCH_COMPILE_DISABLE")
+    or os.environ.get("TORCHDYNAMO_DISABLE")
+)
+
+
+def _gelu_impl(x):
     """
     OpenAI's gelu implementation.
     """
@@ -169,14 +175,20 @@ def gelu_impl(x):
     )
 
 
+gelu_impl = _gelu_impl if _DISABLE_TORCH_COMPILE else torch.jit.script(_gelu_impl)
+
+
 def openai_gelu(x):
     return gelu_impl(x)
 
 
-try:
-    jit_fuser = torch.compile
-except Exception:
-    jit_fuser = torch.jit.script
+if _DISABLE_TORCH_COMPILE:
+    jit_fuser = lambda fn: fn
+else:
+    try:
+        jit_fuser = torch.compile
+    except Exception:
+        jit_fuser = torch.jit.script
 
 
 @jit_fuser
@@ -185,8 +197,7 @@ def squared_relu(x):
 
 
 # This is actually Python equivalent of torch.nn.functional.gelu(), also with type hints for ONNX exporter
-@torch.jit.script
-def erf_gelu(x):
+def _erf_gelu(x):
     return (
         x
         * 0.5
@@ -195,6 +206,9 @@ def erf_gelu(x):
             + torch.ones_like(x).to(dtype=x.dtype)
         )
     )
+
+
+erf_gelu = _erf_gelu if _DISABLE_TORCH_COMPILE else torch.jit.script(_erf_gelu)
 
 
 def activation_to_func(

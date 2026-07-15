@@ -14,9 +14,11 @@
 
 import os
 import pathlib
+import socket
 import sys
 import time
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 import psutil
 import rospy
@@ -27,6 +29,33 @@ from rlinf.utils.logging import get_logger
 
 class ROSController:
     """Controller for ROS communication. A controller is used for managing one robot."""
+
+    @staticmethod
+    def _is_live_roscore(proc: psutil.Process) -> bool:
+        try:
+            return (
+                proc.name() == "roscore"
+                and proc.is_running()
+                and proc.status() != psutil.STATUS_ZOMBIE
+            )
+        except (psutil.Error, OSError):
+            return False
+
+    @staticmethod
+    def _wait_for_ros_master(timeout_s: float = 10.0) -> bool:
+        master_uri = os.environ.get("ROS_MASTER_URI", "http://localhost:11311")
+        parsed = urlparse(master_uri)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 11311
+        deadline = time.time() + timeout_s
+
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.25):
+                    return True
+            except OSError:
+                time.sleep(0.1)
+        return False
 
     def __init__(self, ros_version: int = 1):
         """Initialize the ROS controller."""
@@ -48,14 +77,21 @@ class ROSController:
                 self._ros_core = None
                 # Check roscore state and launch roscore
                 for proc in psutil.process_iter():
-                    if proc.name() == "roscore":
+                    if self._is_live_roscore(proc):
                         self._ros_core = proc
+                        break
 
                 if self._ros_core is None:
                     self._ros_core = psutil.Popen(
                         ["roscore"], stdout=sys.stdout, stderr=sys.stdout
                     )
-                    time.sleep(1)  # Wait for roscore to start
+                if not self._wait_for_ros_master():
+                    raise RuntimeError(
+                        "ROS master did not become reachable at "
+                        f"{os.environ.get('ROS_MASTER_URI', 'http://localhost:11311')}. "
+                        "Check for stale/zombie roscore processes or ROS networking "
+                        "configuration before starting the Franka controller."
+                    )
 
         # Initialize ros node
         rospy.init_node("franka_controller", anonymous=True)

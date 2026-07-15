@@ -1,0 +1,98 @@
+defaults:
+  - env/realworld_physical_agent_franka@env.eval
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  # NUC-only collection template. For multi-node collection/eval, keep env on
+  # the franka node and place rollout/actor on the GPU node in a separate config.
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: franka
+      placement: 0
+  node_groups:
+    - label: franka
+      node_ranks: 0
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: 192.168.1.2
+            node_rank: 0
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: null
+    project_name: rlinf
+    experiment_name: "franka-grasp-primitive-collect"
+    logger_backends: ["tensorboard"]
+  # Start with a small smoke-test batch; increase after inspecting LeRobot data.
+  num_data_episodes: 20
+  # Keep language in the dataset so the VLA can learn prompt-conditioned grasping.
+  record_task_description: True
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    # Inherited base env: env/realworld_physical_agent_franka.
+    # Override only collection-specific knobs here.
+    use_spacemouse: True
+    keyboard_reward_wrapper: single_stage
+    main_image_key: wrist_1
+    video_cfg:
+      save_video: False
+      info_on_video: True
+      video_base_dir: ${runner.logger.log_path}/video/collect
+    data_collection:
+      enabled: True
+      save_dir: ${runner.logger.log_path}/collected_data
+      export_format: "lerobot"
+      only_success: True
+      robot_type: "panda"
+      fps: 10
+      finalize_interval: 20
+    override_cfg:
+      is_dummy: false
+      # Per-run prompt. Override this for each target class, for example:
+      # env.eval.override_cfg.task_description="grasp the red cube"
+      task_description: "grasp the target object"
+      enable_camera_player: True
+      
+      # Primitive collection should start from an operator/Agent-staged pose.
+      target_ee_pose: [0.65875577, 0.04438992, 0.07458871, 2.94857731, -0.0676843, -0.18130717]
+      # Derived from target_ee_pose + 0.20m z, matching the old peg-collection
+      # reset rule. This is the main field to retune for grasp collection.
+      reset_ee_pose: [0.65875577, 0.04438992, 0.07458871, 2.94857731, -0.0676843, -0.18130717]
+      # Keep the VLA collection safety box fixed to the agent_franka workspace
+      # even though this VLA target_ee_pose differs from the analytic-agent target.
+      derive_safety_box_from_target: false
+      ee_pose_limit_min: [0.08568951, -0.4622944, -0.04938398, 2.99238222, -0.01808239, -1.67303466]
+      ee_pose_limit_max: [1.08568951, 0.5377056, 0.19061602, 3.01238222, 0.00191761, 1.48696534]
+
+      compliance_param:
+        translational_stiffness: 2000
+        translational_damping: 89
+        rotational_stiffness: 150
+        rotational_damping: 7
+        translational_Ki: 0
+        translational_clip_x: 0.01
+        translational_clip_y: 0.01
+        translational_clip_z: 0.01
+        translational_clip_neg_x: 0.01
+        translational_clip_neg_y: 0.01
+        translational_clip_neg_z: 0.01
+        rotational_clip_x: 0.1
+        rotational_clip_y: 0.1
+        rotational_clip_z: 0.1
+        rotational_clip_neg_x: 0.1
+        rotational_clip_neg_y: 0.1
+        rotational_clip_neg_z: 0.1
+        rotational_Ki: 0

@@ -1,0 +1,80 @@
+defaults:
+  - env/realworld_physical_agent_franka@env.eval
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: franka
+      placement: 0
+  node_groups:
+    - label: franka
+      node_ranks: 0
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: 192.168.1.2
+            node_rank: 0
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: null
+    project_name: rlinf
+    experiment_name: "franka-grasp-primitive-eval"
+    logger_backends: ["tensorboard"]
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    use_spacemouse: False
+    keyboard_reward_wrapper: null
+    main_image_key: wrist_1
+    video_cfg:
+      save_video: False
+      info_on_video: True
+      video_base_dir: ${runner.logger.log_path}/video/eval
+    data_collection:
+      enabled: False
+    override_cfg:
+      task_description: "grasp the target object"
+      enable_camera_player: False
+      
+      # Primitive collection should start from an operator/Agent-staged pose.
+      target_ee_pose: [0.65875577, 0.04438992, 0.07458871, 2.94857731, -0.0676843, -0.18130717]
+      reset_ee_pose: [0.63, 0.0, 0.1, 2.94857731, -0.0676843, -0.18130717]
+      # default reset_ee_pose is target_ee_pose + [0.0, 0.0, clip_z_range_high, 0.0, 0.0, 0.0]
+      # Keep the VLA safety box fixed to the agent_franka workspace even though
+      # this VLA target_ee_pose differs from the analytic-agent target.
+      derive_safety_box_from_target: false
+      ee_pose_limit_min: [0.08568951, -0.4622944, -0.04938398, 2.99238222, -0.01808239, -1.67303466]
+      ee_pose_limit_max: [1.08568951, 0.5377056, 0.19061602, 3.01238222, 0.00191761, 1.48696534]
+
+      compliance_param:
+        translational_stiffness: 2000
+        translational_damping: 89
+        rotational_stiffness: 150
+        rotational_damping: 7
+        translational_Ki: 0
+        translational_clip_x: 0.01
+        translational_clip_y: 0.01
+        translational_clip_z: 0.01
+        translational_clip_neg_x: 0.01
+        translational_clip_neg_y: 0.01
+        translational_clip_neg_z: 0.01
+        rotational_clip_x: 0.1
+        rotational_clip_y: 0.1
+        rotational_clip_z: 0.1
+        rotational_clip_neg_x: 0.1
+        rotational_clip_neg_y: 0.1
+        rotational_clip_neg_z: 0.1
+        rotational_Ki: 0
