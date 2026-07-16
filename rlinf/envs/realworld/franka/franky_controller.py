@@ -384,6 +384,9 @@ class FrankyController(Worker):
     def close_gripper(self) -> None:
         self._gripper.close(speed=1.0)
 
+    def move_gripper(self, position: int, speed: float = 1.0) -> None:
+        self._gripper.move(position, speed=speed)
+
     def cleanup(self) -> None:
         self._stop_tracking_motion()
         self._stop_cart_tracking_motion()

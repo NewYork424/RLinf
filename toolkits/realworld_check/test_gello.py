@@ -513,7 +513,7 @@ def run_align_sequential(_args: argparse.Namespace) -> None:
 
 PI = np.pi
 CALIB_POSE_A = np.array([0.0, -PI / 4, 0.0, -3 * PI / 4, 0.0, PI / 2, PI / 4])
-CALIB_POSE_B = np.array([-PI / 4, 0.0, -PI / 4, -PI / 2, PI / 4, 3 * PI / 4, 0.0])
+CALIB_POSE_B = np.array([PI / 4, 0.0, PI / 4, -PI / 2, PI / 4, 3 * PI / 4, 0.0])
 CALIB_JOINT_IDS = (1, 2, 3, 4, 5, 6, 7)
 CALIB_GRIPPER_ID = 8
 CALIB_NUM_ARM = len(CALIB_JOINT_IDS)

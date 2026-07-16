@@ -84,11 +84,11 @@ env:
     keyboard_reward_wrapper: "start_end"
     # GELLO serial ports — inherited from env/realworld_franka_joint_dual.
     # Override here only if you swap GELLO units for a session.
-    left_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAM5DHY-if00-port0"
+    left_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJEDPC-if00-port0"
     #right_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJEDPC-if00-port0"
     right_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA0OUKN-if00-port0"
     override_cfg:
-      task_description: "Hold one side of the bag handle with the left hand to keep it open, then use the right hand to sequentially pick up the drink, potato chips ,and biscuits and place them into the bag."
+      task_description: "Use the right arm to pick up the purple peg, hand it over to the left arm, and then insert the peg into the white box."
       joint_action_mode: "absolute"
 
       #cv2

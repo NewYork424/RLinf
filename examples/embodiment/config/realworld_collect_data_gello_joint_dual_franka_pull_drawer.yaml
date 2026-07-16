@@ -88,7 +88,7 @@ env:
     #right_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJEDPC-if00-port0"
     right_gello_port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA0OUKN-if00-port0"
     override_cfg:
-      task_description: "Hold one side of the bag handle with the left hand to keep it open, then use the right hand to sequentially pick up the drink, potato chips ,and biscuits and place them into the bag."
+      task_description: "The right arm pulls open the drawer, while the left arm places the two items into the drawer one after another"
       joint_action_mode: "absolute"
 
       #cv2

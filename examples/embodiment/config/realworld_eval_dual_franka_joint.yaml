@@ -1,6 +1,6 @@
 defaults:
-  - env/realworld_dual_franka_tcp_rot6d@env.train
-  - env/realworld_dual_franka_tcp_rot6d@env.eval
+  - env/realworld_dual_franka_joint@env.train
+  - env/realworld_dual_franka_joint@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - weight_syncer/patch_syncer@weight_syncer
@@ -58,7 +58,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: dual-franka-openpi
-    experiment_name: "realworld-eval-dual-franka"
+    experiment_name: "realworld-eval-dual-franka-joint"
     logger_backends: ["tensorboard"]
   max_epochs: 100
   max_steps: 100
@@ -94,12 +94,12 @@ env:
     max_episode_steps: 10000
     max_steps_per_rollout_epoch: 10000
     override_cfg:
-      
+
       # task_description: "Hold one side of the bag handle with the left hand to keep it open, then use the right hand to sequentially pick up the drink, potato chips ,and biscuits and place them into the bag."
-      # task_description: "I am currently performing a desk organizing task. I will use my right hand to hand  bowls, plates, cups, chopsticks, and a spoon to my left hand in order, and then put them into a basket." 
+      #  task_description: "I am currently performing a desk organizing task. I will use my right hand to hand  bowls, plates, cups, chopsticks, and a spoon to my left hand in order, and then put them into a basket."
       task_description: "I am completing a task of washing a cup. I need to pick up the cup with my left hand, pick up the brush with my right hand, use the brush to rotate and clean inside the cup, and then put the cup and the brush back in their original positions."
       # task_description: "Grab the cup with your left hand, grab the brush with your right hand, scrub the cup, then put the brush back onto the plate and invert the cup."
-      # task_description: "The right arm pulls open the drawer, while the left arm places the two items into the drawer one after another.Quality:5."
+      # task_description: "The right arm pulls open the drawer, while the left arm places the two items into the drawer one after another"
        # Replace: prompt for the SFT policy
       #cv2 default false
       enable_camera_player: false
@@ -115,18 +115,21 @@ env:
       joint_reset_qpos:
         # - [ 0.224, 0.041, -0.579, -1.744, -0.366, 2.586,  0.312]
         # - [-0.445, 0.125,  0.622, -1.565,  0.260, 1.988, -0.553]
-        # umi-washing
-        # - [0.5061,-0.0349,-0.6109,-1.8675,-0.2094,2.2515,0.5061]
-        # - [0.7156,-0.1396,-0.7679,-2.0246,0.0873,2.3562,-0.4538]
-        # umi-bagging
+        #umi
+        # - [-0.1571,-0.6807, 0.1396, -2.5307, -0.1222, 2.6354,0.1396]
+        # - [0.1396, -0.6283, -0.0524, -3.0543, 0.0524, 3.5256, -0.0175]
+        #umi-washing
+        # - [-0.2618, -0.2967, 0.0349, -2.3562, 0.4363, 2.7053, -0.6981]
+        # - [2.5307, 0.4363, -2.3387, -2.3213, 0.2618, 2.6529, 0.2269]
+        # bagging_umi
         # - [0.4363, -0.5411, -0.4712, -2.3736, -0.8203, 2.6529, 0.4712]
         # - [-0.0524, -0.4014, 0.0698, -2.6354, -0.1920, 3.1067, 0.3665]
-        # umi-pull-drawer
-        # - [0.1745, -0.3142, -0.1047, -2.0246, -0.4712, 2.0769, 0.6283]
-        # - [0.1047, -0.5061, -0.0175, -2.3562, 0.4189, 2.6005, -0.0524]
-        # # #dual-franka
+        # #dual-franka
         - [-0.22, 0.09, 0.35, -1.62, 0.21, 2.2, -0.56]
         - [-0.16, 0.23, -0.16, -1.48, -0.12, 2.41, 0.21]
+        # #washing
+        # - [-0.6109, -0.5061, 0.2793, -2.5656, -0.2094, 2.8274, 0.1920]
+        # - [0.4887, -0.6632, -0.4189, -2.6878, 0, 2.8623, -0.1745]
       target_ee_pose:                         # Replace if your workspace differs
         - [0.5, -0.2, 0.5, -3.14, 0.0, 0.0]
         - [0.5,  0.2, 0.5, -3.14, 0.0, 0.0]
@@ -135,7 +138,7 @@ env:
     #open rollout-collect—data
     data_collection:
       enabled: False
-      save_dir: /home/raojiaji/data_raojiaji/rollout_data/deploy_612_umi_franka
+      save_dir: /home/raojiaji/data_raojiaji/rollout_data/deploy_joint_franka
       export_format: "lerobot"
       robot_type: "dual_FR3"
       fps: 10
@@ -153,10 +156,10 @@ rollout:
   collect_prev_infos: False
   sync_weight_nccl_max_ctas: 32
   model:
-    # SFT ckpt expected layout:abb
+    # SFT ckpt expected layout:
     #   <model_path>/actor/model_state_dict/full_weights.pt
-    #   <model_path>/<openpi_data.repo_id>/norm_stats.jsonb
-    model_path: /home/raojiaji/deploy/test4 #/home/raojiaji/deploy/deploy_629_washing_mixed_franka_umi # deploy_616_umi_franka_washing_cropped   # Replace: /path/to/checkpoints/<run>/global_step_<N>/
+    #   <model_path>/<openpi_data.repo_id>/norm_stats.json
+    model_path: /home/raojiaji/deploy/deploy_0627_clean_cup_307_joint  # Replace: /path/to/checkpoints/<run>/global_step_<N>/
     precision: ${actor.model.precision}
 
 critic:
@@ -173,10 +176,10 @@ actor:
     model_path: ${rollout.model.model_path}
     precision: null
     num_action_chunks: 20          # matches SFT action_horizon
-    action_dim: 20                 # dual-franka tcp_rot6d: [L_xyz, L_rot6d, L_grip, R_xyz, R_rot6d, R_grip]
+    action_dim: 16                 # dual-franka joint: [L_j(7), L_grip, R_j(7), R_grip]
     add_value_head: False
     openpi:
-      config_name: "pi05_dualfranka_tcp_rot6d"
+      config_name: "pi05_dualfranka_joint"
       train_expert_only: False
       detach_critic_input: True
       action_chunk: ${actor.model.num_action_chunks}

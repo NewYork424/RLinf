@@ -65,6 +65,9 @@ from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.dual_franka_joint_dataconfig import (
+    DualFrankaJointDataConfig,
+)
 
 _CONFIGS = [
     TrainConfig(
@@ -410,6 +413,20 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),
             extra_delta_transform=True,
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+        TrainConfig(
+        name="pi05_dualfranka_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=20, discrete_state_input=False
+        ),
+        data=DualFrankaJointDataConfig(
+            repo_id="",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),
+            extra_delta_transform=True,
+            state_mode="joint_only",
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
     ),
