@@ -65,6 +65,7 @@ class DualFrankaRobotConfig:
     base_camera_type: Optional[str] = None
     left_camera_type: Optional[str] = None
     right_camera_type: Optional[str] = None
+    enable_camera_depth: bool = False
 
     left_gripper_type: Optional[str] = None
     right_gripper_type: Optional[str] = None
@@ -189,6 +190,7 @@ class DualFrankaEnv(gym.Env):
         # Cache of last successful frame per camera, for graceful degradation
         # when a single camera stalls (used by _get_camera_frames).
         self._last_camera_frame: dict[str, np.ndarray] = {}
+        self._raw_camera_meta: dict[str, dict[str, object]] = {}
 
         self._open_cameras()
         self.camera_player = VideoPlayer(self.config.enable_camera_player)
@@ -230,13 +232,35 @@ class DualFrankaEnv(gym.Env):
     def _all_camera_serials(self) -> list[str]:
         return [serial for _, serial, _ in self._all_camera_specs()]
 
-    def _open_cameras(self):
-        self._cameras: list[BaseCamera] = []
-        camera_infos = [
-            CameraInfo(name=name, serial_number=serial, camera_type=ct)
+    @staticmethod
+    def _supports_depth(camera_type: str) -> bool:
+        return str(camera_type).lower() in {"realsense", "rs", "zed"}
+
+    def _camera_infos(self) -> list[CameraInfo]:
+        return [
+            CameraInfo(
+                name=name,
+                serial_number=serial,
+                camera_type=ct,
+                enable_depth=(
+                    bool(self.config.enable_camera_depth)
+                    and self._supports_depth(ct)
+                ),
+            )
             for name, serial, ct in self._all_camera_specs()
         ]
+
+    def _open_cameras(self):
+        self._cameras: list[BaseCamera] = []
+        camera_infos = self._camera_infos()
         for info in camera_infos:
+            if self.config.enable_camera_depth and not info.enable_depth:
+                self._logger.info(
+                    "Camera %s type=%s does not expose depth through the "
+                    "current RLinf backend; keeping RGB-only raw output.",
+                    info.name,
+                    info.camera_type,
+                )
             camera = create_camera(info)
             camera.open()
             self._cameras.append(camera)
@@ -257,13 +281,90 @@ class DualFrankaEnv(gym.Env):
         resized = cv2.resize(cropped, reshape_size)
         return cropped, resized
 
-    def _get_camera_frames(self) -> dict[str, np.ndarray]:
+    @staticmethod
+    def _split_rgb_depth(
+        camera: BaseCamera,
+        frame: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Split a backend frame into BGR uint8 and metric depth, if present."""
+        if frame.ndim != 3 or frame.shape[-1] < 3:
+            raise ValueError(
+                f"Camera {camera._camera_info.name} returned invalid frame "
+                f"shape {frame.shape}; expected HxWxC with C>=3."
+            )
+        bgr = np.asarray(frame[..., :3])
+        if bgr.dtype != np.uint8:
+            bgr = np.clip(bgr, 0, 255).astype(np.uint8)
+        depth = None
+        if frame.shape[-1] >= 4:
+            depth_raw = np.asarray(frame[..., 3], dtype=np.float32)
+            depth_scale = float(getattr(camera, "depth_scale", 1.0))
+            depth = depth_raw * depth_scale
+        return bgr, depth
+
+    @staticmethod
+    def _camera_intrinsics(camera: BaseCamera) -> dict[str, object] | None:
+        getter = getattr(camera, "get_color_intrinsics", None)
+        if callable(getter):
+            try:
+                return dict(getter())
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _build_raw_camera_meta(
+        camera: BaseCamera,
+        raw_rgb: np.ndarray,
+        raw_depth: np.ndarray | None,
+    ) -> dict[str, object]:
+        info = camera._camera_info
+        meta: dict[str, object] = {
+            "name": info.name,
+            "serial_number": info.serial_number,
+            "camera_type": info.camera_type,
+            "rgb_shape": list(raw_rgb.shape),
+            "depth_shape": list(raw_depth.shape) if raw_depth is not None else None,
+            "depth_enabled": bool(info.enable_depth),
+            "depth_available": raw_depth is not None,
+            "depth_unit": "m" if raw_depth is not None else None,
+            "rgb_is_uncropped_unresized_env_output": True,
+        }
+        intrinsics = DualFrankaEnv._camera_intrinsics(camera)
+        if intrinsics is not None:
+            meta["color_intrinsics"] = intrinsics
+        depth_scale = getattr(camera, "depth_scale", None)
+        if depth_scale is not None:
+            meta["depth_scale"] = float(depth_scale)
+        return meta
+
+    @staticmethod
+    def _raw_bgr_for_snapshot(
+        camera: BaseCamera,
+        fallback_bgr: np.ndarray,
+    ) -> np.ndarray:
+        getter = getattr(camera, "get_native_bgr_frame", None)
+        if callable(getter):
+            native = getter()
+            if native is not None:
+                native = np.asarray(native)
+                if native.ndim == 3 and native.shape[-1] >= 3:
+                    bgr = native[..., :3]
+                    if bgr.dtype != np.uint8:
+                        bgr = np.clip(bgr, 0, 255).astype(np.uint8)
+                    return bgr
+        return fallback_bgr
+
+    def _read_camera_bundle(self) -> dict[str, dict[str, np.ndarray]]:
         """Read one frame per camera. On stall, fall back to the last-good
         frame and replace just that camera in-place; other cameras keep
         producing fresh frames. Raises only when a camera stalls before
         producing any frame (no cache to fall back to).
         """
         frames: dict[str, np.ndarray] = {}
+        raw_frames: dict[str, np.ndarray] = {}
+        raw_depths: dict[str, np.ndarray] = {}
+        self._raw_camera_meta = {}
         display_frames: dict[str, np.ndarray] = {}
 
         for i, camera in enumerate(self._cameras):
@@ -272,25 +373,52 @@ class DualFrankaEnv(gym.Env):
                 frame = camera.get_frame(timeout=_CAMERA_FRAME_TIMEOUT_S)
             except queue.Empty:
                 cached = self._last_camera_frame.get(name)
-                if cached is None:
-                    raise RuntimeError(
-                        f"Camera {name} stalled with no cached frame to fall back to."
-                    )
                 self._logger.error("Camera %s stalled; replacing.", name)
                 camera.close()
                 self._cameras[i] = create_camera(camera._camera_info)
                 self._cameras[i].open()
-                frame = cached
+                camera = self._cameras[i]
+                if cached is None:
+                    try:
+                        frame = camera.get_frame(timeout=5.0)
+                    except queue.Empty as exc:
+                        raise RuntimeError(
+                            f"Camera {name} stalled with no cached frame to fall back to."
+                        ) from exc
+                else:
+                    frame = cached
+
+            frame_bgr, raw_depth = self._split_rgb_depth(camera, frame)
+            raw_bgr = self._raw_bgr_for_snapshot(camera, frame_bgr)
+            raw_rgb = raw_bgr[..., ::-1].copy()
+            raw_frames[name] = raw_rgb
+            if raw_depth is not None:
+                raw_depths[name] = raw_depth.astype(np.float32, copy=False)
+            elif camera._camera_info.enable_depth:
+                raw_depths[name] = np.zeros(frame_bgr.shape[:2], dtype=np.float32)
+            self._raw_camera_meta[name] = self._build_raw_camera_meta(
+                camera,
+                raw_rgb,
+                raw_depth,
+            )
 
             reshape_size = self.observation_space["frames"][name].shape[:2][::-1]
-            cropped, resized = self._crop_frame(frame, reshape_size)
+            cropped, resized = self._crop_frame(frame_bgr, reshape_size)
             frames[name] = resized[..., ::-1]
             display_frames[name] = resized
             display_frames[f"{name}_full"] = cropped
             self._last_camera_frame[name] = frame
 
         self.camera_player.put_frame(display_frames)
-        return frames
+        return {
+            "frames": frames,
+            "raw_frames": raw_frames,
+            "raw_depths": raw_depths,
+        }
+
+    def _get_camera_frames(self) -> dict[str, np.ndarray]:
+        """Return policy/VLA frames on the original crop+resize path."""
+        return self._read_camera_bundle()["frames"]
 
     # ---------------------------------------------------------------- hardware
 
@@ -506,6 +634,23 @@ class DualFrankaEnv(gym.Env):
     @property
     def num_steps(self):
         return self._num_steps
+
+    def get_raw_camera_metadata(self) -> dict[str, dict[str, object]]:
+        """Return metadata for the most recent uncropped raw camera frames."""
+        return getattr(self, "_raw_camera_meta", {}).copy()
+
+    def get_raw_camera_snapshot(self) -> dict[str, dict[str, np.ndarray]]:
+        """Return uncropped RGB plus depth for PhysicalAgent side-channel use.
+
+        This deliberately does not alter the policy/VLA observation format.
+        The normal observation keeps using cropped 224x224 ``frames``.
+        """
+        bundle = self._read_camera_bundle()
+        return {
+            "raw_frames": bundle["raw_frames"],
+            "raw_depths": bundle["raw_depths"],
+            "camera_meta": self.get_raw_camera_metadata(),
+        }
 
     @property
     def target_ee_pose(self):

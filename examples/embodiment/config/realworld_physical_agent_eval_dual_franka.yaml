@@ -90,7 +90,7 @@ env:
     use_gello_joint: False
     use_gello: False
     use_spacemouse: False
-    keyboard_reward_wrapper: eval_control
+    keyboard_reward_wrapper: null
     max_episode_steps: 10000
     max_steps_per_rollout_epoch: 10000
     override_cfg:
@@ -156,7 +156,7 @@ rollout:
     # SFT ckpt expected layout:abb
     #   <model_path>/actor/model_state_dict/full_weights.pt
     #   <model_path>/<openpi_data.repo_id>/norm_stats.jsonb
-    model_path: /home/raojiaji/deploy_umi/716_data_size_300_1_1 #/home/raojiaji/deploy/deploy_629_washing_mixed_franka_umi # deploy_616_umi_franka_washing_cropped   # Replace: /path/to/checkpoints/<run>/global_step_<N>/
+    model_path: /home/raojiaji/deploy/deploy_0727_jax_clean_desk  #/home/raojiaji/deploy/deploy_629_washing_mixed_franka_umi # deploy_616_umi_franka_washing_cropped   # Replace: /path/to/checkpoints/<run>/global_step_<N>/
     precision: ${actor.model.precision}
 
 critic:

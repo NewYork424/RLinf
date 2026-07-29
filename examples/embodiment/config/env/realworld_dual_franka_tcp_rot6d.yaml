@@ -33,6 +33,9 @@ init_params:
 override_cfg:
   is_dummy: false
   task_description: "dual arm TCP-rot6d manipulation task"
+  # Keep policy/VLA images on the existing crop+resize path, but expose raw
+  # uncropped camera RGBD artifacts for PhysicalAgent perception/debug.
+  enable_camera_depth: true
   # Only "rot6d" is currently implemented in DualFrankaTcpEnv.
   rotation_repr: rot6d
   max_num_steps: 300

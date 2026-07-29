@@ -58,6 +58,7 @@ class LumosCamera(BaseCamera):
             raise ValueError("LumosCamera does not support depth capture via V4L2.")
 
         self._out_w, self._out_h = camera_info.resolution
+        self._last_native_bgr: Optional[np.ndarray] = None
         # XVisio vSLAM only streams YU12 at 1280x1280; off-spec hangs at select(). Resize in software.
         self._native_w, self._native_h = self._NATIVE_W, self._NATIVE_H
         dev_path: Union[str, int] = self._resolve_device_path(camera_info.serial_number)
@@ -134,11 +135,18 @@ class LumosCamera(BaseCamera):
             )
             return False, None
         bgr = self._cv2.cvtColor(yuv, self._cv2.COLOR_YUV2BGR_I420)
+        self._last_native_bgr = bgr.copy()
         if (self._native_w, self._native_h) != (self._out_w, self._out_h):
             bgr = self._cv2.resize(
                 bgr, (self._out_w, self._out_h), interpolation=self._cv2.INTER_AREA
             )
         return True, bgr
+
+    def get_native_bgr_frame(self) -> Optional[np.ndarray]:
+        """Return the latest native 1280x1280 BGR frame before software resize."""
+        if self._last_native_bgr is None:
+            return None
+        return self._last_native_bgr.copy()
 
     def _close_device(self) -> None:
         if self._cap is not None:

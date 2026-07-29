@@ -23,6 +23,7 @@ Each step pushes (xyz, quat) into a per-arm CartesianImpedanceTracker via
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -140,6 +141,226 @@ class DualFrankaTcpEnv(DualFrankaEnv):
             self._prev_step_quat[arm] = quat
 
             ctrls[arm].move_tcp_pose(np.concatenate([xyz, quat]).astype(np.float64))
+
+    # --------------------------------------------------- manual delta control
+
+    def step_arm_delta(
+        self,
+        arm: str,
+        delta_xyz=None,
+        delta_rpy=None,
+        gripper_open: bool | None = None,
+        frame: str = "base",
+    ):
+        """Move one arm by a small TCP delta without commanding the other arm.
+
+        This is a manual-control helper for PhysicalAgent primitives. It does
+        not change the policy-facing ``step`` semantics: ``step`` remains the
+        absolute 20-D TCP-rot6d action path used by the trained VLA.
+
+        Args:
+            arm: ``"left"`` or ``"right"``.
+            delta_xyz: translation delta in meters. Defaults to zero.
+            delta_rpy: roll/pitch/yaw delta in radians. Defaults to zero.
+            gripper_open: ``True`` opens, ``False`` closes, ``None`` holds.
+            frame: ``"base"`` applies deltas in the robot base frame;
+                ``"eef"`` applies them in the selected end-effector frame.
+        """
+        start_time = time.time()
+        arm_idx = self._manual_arm_index(arm)
+        delta_xyz = self._manual_vec3(delta_xyz, "delta_xyz")
+        delta_rpy = self._manual_vec3(delta_rpy, "delta_rpy")
+        frame = str(frame).lower()
+        if frame not in {"base", "eef"}:
+            raise ValueError("frame must be 'base' or 'eef'")
+
+        if self.config.is_dummy:
+            obs = self._get_observation()
+            return obs, 0.0, False, False, {"arm": arm, "dummy": True}
+
+        states = [self._left_state, self._right_state]
+        ctrls = [self._left_ctrl, self._right_ctrl]
+        state = states[arm_idx]
+        ctrl = ctrls[arm_idx]
+
+        start_pose = state.tcp_pose.copy()
+        start_rot = R.from_quat(start_pose[3:].copy())
+        delta_rot = R.from_euler("xyz", delta_rpy.copy())
+        if frame == "eef":
+            target_xyz = start_pose[:3] + start_rot.apply(delta_xyz)
+            target_rot = start_rot * delta_rot
+        else:
+            target_xyz = start_pose[:3] + delta_xyz
+            target_rot = delta_rot * start_rot
+
+        target_xyz = np.clip(
+            target_xyz,
+            self._xyz_safe_spaces[arm_idx].low,
+            self._xyz_safe_spaces[arm_idx].high,
+        )
+        target_pose = np.concatenate(
+            [target_xyz, target_rot.as_quat()],
+        ).astype(np.float64)
+
+        is_gripper_effective = [False, False]
+        if gripper_open is not None:
+            gripper_cmd = 1.0 if bool(gripper_open) else -1.0
+            is_gripper_effective[arm_idx] = self._gripper_action(
+                arm_idx,
+                ctrl,
+                state,
+                gripper_cmd,
+            )
+
+        if np.any(delta_xyz != 0.0) or np.any(delta_rpy != 0.0):
+            ctrl.move_tcp_pose(target_pose)
+            self._prev_step_quat[arm_idx] = target_pose[3:].astype(np.float32)
+
+        self._num_steps += 1
+        if self._pace_between_action_and_state_read():
+            step_time = time.time() - start_time
+            time.sleep(max(0.0, (1.0 / self.config.step_frequency) - step_time))
+
+        left_st_f = self._left_ctrl.get_state()
+        right_st_f = self._right_ctrl.get_state()
+        self._left_state = left_st_f.wait()[0]
+        self._right_state = right_st_f.wait()[0]
+
+        observation = self._get_observation()
+        reward = self._calc_step_reward(is_gripper_effective)
+        terminated = (reward == 1.0) and (
+            self._success_hold_counter >= self.config.success_hold_steps
+        )
+        truncated = self._num_steps >= self.config.max_num_steps
+        info = {
+            "arm": "left" if arm_idx == 0 else "right",
+            "frame": frame,
+            "start_tcp_pose": start_pose.astype(np.float32),
+            "target_tcp_pose": target_pose.astype(np.float32),
+            "gripper_open": gripper_open,
+            "gripper_effective": is_gripper_effective[arm_idx],
+            "other_arm_commanded": False,
+        }
+        return observation, reward, terminated, truncated, info
+
+    def step_arm_pose(
+        self,
+        arm: str,
+        target_pose,
+        gripper_open: bool | None = None,
+    ):
+        """Move one arm toward one absolute TCP pose in its robot base frame.
+
+        Args:
+            arm: ``"left"`` or ``"right"``.
+            target_pose: Length-7 ``[xyz, quat_xyzw]`` target pose.
+            gripper_open: ``True`` opens, ``False`` closes, ``None`` holds.
+
+        Returns:
+            Gym-style ``(observation, reward, terminated, truncated, info)``.
+        """
+        start_time = time.time()
+        arm_idx = self._manual_arm_index(arm)
+        target_pose = self._manual_pose7(target_pose, "target_pose")
+
+        if self.config.is_dummy:
+            obs = self._get_observation()
+            return obs, 0.0, False, False, {"arm": arm, "dummy": True}
+
+        states = [self._left_state, self._right_state]
+        ctrls = [self._left_ctrl, self._right_ctrl]
+        state = states[arm_idx]
+        ctrl = ctrls[arm_idx]
+        start_pose = state.tcp_pose.copy()
+
+        target_pose[:3] = np.clip(
+            target_pose[:3],
+            self._xyz_safe_spaces[arm_idx].low,
+            self._xyz_safe_spaces[arm_idx].high,
+        )
+        reference_quat = self._prev_step_quat[arm_idx]
+        if reference_quat is None:
+            reference_quat = start_pose[3:]
+        if float(np.dot(target_pose[3:], reference_quat)) < 0.0:
+            target_pose[3:] = -target_pose[3:]
+
+        is_gripper_effective = [False, False]
+        if gripper_open is not None:
+            gripper_cmd = 1.0 if bool(gripper_open) else -1.0
+            is_gripper_effective[arm_idx] = self._gripper_action(
+                arm_idx,
+                ctrl,
+                state,
+                gripper_cmd,
+            )
+
+        ctrl.move_tcp_pose(target_pose.astype(np.float64))
+        self._prev_step_quat[arm_idx] = target_pose[3:].astype(np.float32)
+
+        self._num_steps += 1
+        if self._pace_between_action_and_state_read():
+            step_time = time.time() - start_time
+            time.sleep(max(0.0, (1.0 / self.config.step_frequency) - step_time))
+
+        left_st_f = self._left_ctrl.get_state()
+        right_st_f = self._right_ctrl.get_state()
+        self._left_state = left_st_f.wait()[0]
+        self._right_state = right_st_f.wait()[0]
+
+        observation = self._get_observation()
+        reward = self._calc_step_reward(is_gripper_effective)
+        terminated = (reward == 1.0) and (
+            self._success_hold_counter >= self.config.success_hold_steps
+        )
+        truncated = self._num_steps >= self.config.max_num_steps
+        info = {
+            "arm": "left" if arm_idx == 0 else "right",
+            "frame": "base",
+            "control": "absolute_pose",
+            "start_tcp_pose": start_pose.astype(np.float32),
+            "target_tcp_pose": target_pose.astype(np.float32),
+            "gripper_open": gripper_open,
+            "gripper_effective": is_gripper_effective[arm_idx],
+            "other_arm_commanded": False,
+        }
+        return observation, reward, terminated, truncated, info
+
+    def set_arm_gripper(self, arm: str, open: bool):
+        """Open or close one gripper without sending TCP commands to either arm."""
+        return self.step_arm_delta(arm=arm, gripper_open=bool(open))
+
+    @staticmethod
+    def _manual_arm_index(arm: str) -> int:
+        arm_name = str(arm).lower()
+        if arm_name == "left":
+            return 0
+        if arm_name == "right":
+            return 1
+        raise ValueError("arm must be 'left' or 'right'")
+
+    @staticmethod
+    def _manual_vec3(value, name: str) -> np.ndarray:
+        if value is None:
+            return np.zeros(3, dtype=np.float32)
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.shape != (3,):
+            raise ValueError(f"{name} must be a length-3 vector, got {arr.shape}")
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name} must contain only finite values")
+        return arr
+
+    @staticmethod
+    def _manual_pose7(value, name: str) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float64).copy()
+        if arr.shape != (7,):
+            raise ValueError(f"{name} must be a length-7 pose, got {arr.shape}")
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name} must contain only finite values")
+        quat_norm = float(np.linalg.norm(arr[3:]))
+        if quat_norm <= 1e-8:
+            raise ValueError(f"{name} quaternion norm must be positive")
+        arr[3:] /= quat_norm
+        return arr
 
     # ------------------------------------------------------------ obs + utils
 
